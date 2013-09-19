@@ -90,6 +90,42 @@ enum PSMoveTracker_Exposure {
 };
 
 /**
+ * \brief Create a new PS Move Tracker instance configured with default values
+ *
+ * \return A new \ref PSMoveTracker instance or \c NULL on error
+ **/
+ADDAPI PSMoveTracker *
+ADDCALL psmove_tracker_create_default();
+
+/**
+ * \brief Start the exposure lock initialization. Currently only needed for
+ * iSight cameras
+ *
+ * \return A new \ref PSMoveTracker instance or \c NULL on error
+ **/
+ADDAPI PSMove *
+ADDCALL psmove_tracker_exposure_lock_init();
+
+/**
+ * \brief Configures the selected camera for tracking
+ *
+ * \param move The PSMove instance returned from \ref psmove_tracker_exposure_lock_init
+ * \param tracker The PSMoveTracker instance returned from \ref psmove_tracker_create_default
+ * \param camera Zero-based index of the camera to use
+ **/
+ADDAPI void 
+ADDCALL psmove_tracker_exposure_lock_process(PSMove *move, PSMoveTracker *tracker, int camera);
+
+/**
+ * \brief Finishes the exposure lock initialization. Currently only needed for
+ * iSight cameras
+ *
+ * \param move The PSMove instance returned from \ref psmove_tracker_exposure_lock_init
+ **/
+ADDAPI void 
+ADDCALL psmove_tracker_exposure_lock_finish(PSMove *move);
+
+/**
  * \brief Create a new PS Move Tracker instance and open the camera
  *
  * This will select the best camera for tracking (this means that if

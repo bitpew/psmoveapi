@@ -399,6 +399,199 @@ psmove_tracker_remember_color(PSMoveTracker *tracker, struct PSMove_RGBValue rgb
 
 // -------- END: internal functions only
 
+PSMoveTracker *
+psmove_tracker_create_default() {
+    PSMoveTracker* tracker = (PSMoveTracker*) calloc(1, sizeof(PSMoveTracker));
+    tracker->rHSV = cvScalar(COLOR_FILTER_RANGE_H, COLOR_FILTER_RANGE_S, COLOR_FILTER_RANGE_V, 0);
+    tracker->storage = cvCreateMemStorage(0);
+
+    tracker->dimming_factor = 0.;
+
+    tracker->calibration_t = CALIBRATION_DIFF_T;
+    tracker->tracker_t1 = TRACKER_QUALITY_T1;
+    tracker->tracker_t2 = TRACKER_QUALITY_T2;
+    tracker->tracker_t3 = TRACKER_QUALITY_T3;
+    tracker->tracker_adaptive_xy = TRACKER_ADAPTIVE_XY;
+    tracker->tracker_adaptive_z = TRACKER_ADAPTIVE_Z;
+    tracker->adapt_t1 = COLOR_ADAPTION_QUALITY;
+    tracker->color_t1 = COLOR_UPDATE_QUALITY_T1;
+    tracker->color_t2 = COLOR_UPDATE_QUALITY_T2;
+    tracker->color_t3 = COLOR_UPDATE_QUALITY_T3;
+    tracker->color_update_rate = COLOR_UPDATE_RATE;
+
+    return tracker;
+}
+
+PSMove *
+psmove_tracker_exposure_lock_init() {
+    PSMove *move = psmove_connect();
+    psmove_set_leds(move, 255, 255, 255);
+    psmove_update_leds(move);
+    return move;
+}
+
+void 
+psmove_tracker_exposure_lock_process(PSMove *move, PSMoveTracker *tracker, int camera) {
+#ifdef __APPLE__
+    if(move != NULL) {
+        psmove_set_leds(move, 0, 0, 0);
+        psmove_update_leds(move);
+        psmove_set_leds(move, 255, 255, 255);
+        psmove_update_leds(move);
+    }
+#endif
+
+    // start the video capture device for tracking
+    tracker->cc = camera_control_new(camera);
+
+    char *intrinsics_xml = psmove_util_get_file_path(INTRINSICS_XML);
+    char *distortion_xml = psmove_util_get_file_path(DISTORTION_XML);
+    camera_control_read_calibration(tracker->cc, intrinsics_xml, distortion_xml);
+    free(intrinsics_xml);
+    free(distortion_xml);
+
+    // backup the systems settings, if not already backuped
+    char *filename = psmove_util_get_file_path(PSEYE_BACKUP_FILE);
+    camera_control_backup_system_settings(tracker->cc, filename);
+    free(filename);
+
+#ifndef __APPLE__
+        // try to load color mapping data (not on Mac OS X for now, because the
+        // automatic white balance means we get different colors every time)
+        filename = psmove_util_get_file_path(COLOR_MAPPING_DAT);
+        FILE *fp = NULL;
+        time_t now = time(NULL);
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+
+        if (stat(filename, &st) == 0 && now != (time_t)-1) {
+            if (st.st_mtime >= (now - COLOR_MAPPING_MAX_AGE)) {
+                fp = fopen(filename, "rb");
+            } else {
+                printf("%s is too old - not restoring colors.\n", filename);
+            }
+        }
+
+        if (fp) {
+            if (!fread(&(tracker->color_mapping),
+                        sizeof(struct ColorMappingRingBuffer),
+                        1, fp)) {
+                psmove_WARNING("Cannot read data from: %s\n", filename);
+            } else {
+                printf("color mappings restored.\n");
+            }
+
+            fclose(fp);
+        }
+        free(filename);
+#endif
+
+    // Default to the distance parameters for the PS Eye camera
+    tracker->distance_parameters = pseye_distance_parameters;
+
+    // use static exposure
+    psmove_tracker_set_exposure(tracker, Exposure_LOW);
+
+    // just query a frame so that we know the camera works
+    IplImage* frame = NULL;
+    while (!frame) {
+        frame = camera_control_query_frame(tracker->cc, NULL, NULL);
+    }
+
+    // prepare ROI data structures
+
+        /* Define the size of the biggest ROI */
+        int size = psmove_util_get_env_int(PSMOVE_TRACKER_ROI_SIZE_ENV);
+
+        if (size == -1) {
+            size = MIN(frame->width, frame->height) / 2;
+        } else {
+            psmove_DEBUG("Using ROI size: %d\n", size);
+        }
+
+        int w = size, h = size;
+
+    // We need to grab an image from the camera to determine the frame size
+    psmove_tracker_update_image(tracker);
+
+    tracker->search_tile_width = w;
+    tracker->search_tile_height = h;
+
+    tracker->search_tiles_horizontal = (tracker->frame->width +
+            tracker->search_tile_width - 1) / tracker->search_tile_width;
+    int search_tiles_vertical = (tracker->frame->height +
+            tracker->search_tile_height - 1) / tracker->search_tile_height;
+
+    tracker->search_tiles_count = tracker->search_tiles_horizontal *
+        search_tiles_vertical;
+
+    if (tracker->search_tiles_count % 2 == 0) {
+        /**
+         * search_tiles_count must be uneven, so that when picking every second
+         * tile, we still "visit" every tile after two scans when we wrap:
+         *
+         *  ABA
+         *  BAB
+         *  ABA -> OK, first run = A, second run = B
+         *
+         *  ABAB
+         *  ABAB -> NOT OK, first run = A, second run = A
+         *
+         * Incrementing the count will make the algorithm visit the lower right
+         * item twice, but will then cause the second run to visit 'B's.
+         *
+         * We pick every second tile, so that we only need half the time to
+         * sweep through the whole image (which usually means faster recovery).
+         **/
+        tracker->search_tiles_count++;
+    }
+
+
+    int i;
+    for (i = 0; i < ROIS; i++) {
+        tracker->roiI[i] = cvCreateImage(cvSize(w,h), frame->depth, 3);
+        tracker->roiM[i] = cvCreateImage(cvSize(w,h), frame->depth, 1);
+
+        /* Smaller rois are always square, and 70% of the previous level */
+        h = w = MIN(w,h) * 0.7f;
+    }
+
+    // prepare structure used for erode and dilate in calibration process
+    int ks = 5; // Kernel Size
+    int kc = (ks + 1) / 2; // Kernel Center
+    tracker->kCalib = cvCreateStructuringElementEx(ks, ks, kc, kc, CV_SHAPE_RECT, NULL);
+}
+
+void
+psmove_tracker_exposure_lock_finish(PSMove *move) {
+    if(move != NULL) {
+        psmove_set_leds(move, 0, 0, 0);
+        psmove_update_leds(move);
+        psmove_disconnect(move);
+    }
+}
+
+PSMoveTracker *
+psmove_tracker_new_with_camera(int camera) {
+    PSMoveTracker *tracker = psmove_tracker_create_default();
+
+    PSMove *move = NULL;
+#ifdef __APPLE__
+    move = psmove_tracker_exposure_lock_init();
+    printf("Cover the camera with the sphere and press the Move button\n");
+    _psmove_wait_for_button(move, Btn_MOVE);
+#endif
+    psmove_tracker_exposure_lock_process(move, tracker, camera);
+
+#ifdef __APPLE__
+    printf("Move the controller away and press the Move button\n");
+    _psmove_wait_for_button(move, Btn_MOVE);
+    psmove_tracker_exposure_lock_finish(move);
+#endif
+
+    return tracker;
+}
+
 PSMoveTracker *psmove_tracker_new() {
     int camera = 0;
 
@@ -524,170 +717,6 @@ psmove_tracker_get_mirror(PSMoveTracker *tracker)
     psmove_return_val_if_fail(tracker != NULL, PSMove_False);
 
     return tracker->mirror;
-}
-
-PSMoveTracker *
-psmove_tracker_new_with_camera(int camera) {
-	PSMoveTracker* tracker = (PSMoveTracker*) calloc(1, sizeof(PSMoveTracker));
-	tracker->rHSV = cvScalar(COLOR_FILTER_RANGE_H, COLOR_FILTER_RANGE_S, COLOR_FILTER_RANGE_V, 0);
-	tracker->storage = cvCreateMemStorage(0);
-
-        tracker->dimming_factor = 0.;
-
-	tracker->calibration_t = CALIBRATION_DIFF_T;
-	tracker->tracker_t1 = TRACKER_QUALITY_T1;
-	tracker->tracker_t2 = TRACKER_QUALITY_T2;
-	tracker->tracker_t3 = TRACKER_QUALITY_T3;
-	tracker->tracker_adaptive_xy = TRACKER_ADAPTIVE_XY;
-	tracker->tracker_adaptive_z = TRACKER_ADAPTIVE_Z;
-	tracker->adapt_t1 = COLOR_ADAPTION_QUALITY;
-	tracker->color_t1 = COLOR_UPDATE_QUALITY_T1;
-	tracker->color_t2 = COLOR_UPDATE_QUALITY_T2;
-	tracker->color_t3 = COLOR_UPDATE_QUALITY_T3;
-	tracker->color_update_rate = COLOR_UPDATE_RATE;
-
-#ifdef __APPLE__
-    PSMove *move = psmove_connect();
-    psmove_set_leds(move, 255, 255, 255);
-    psmove_update_leds(move);
-
-    printf("Cover the iSight camera with the sphere and press the Move button\n");
-    _psmove_wait_for_button(move, Btn_MOVE);
-    psmove_set_leds(move, 0, 0, 0);
-    psmove_update_leds(move);
-    psmove_set_leds(move, 255, 255, 255);
-    psmove_update_leds(move);
-#endif
-
-	// start the video capture device for tracking
-	tracker->cc = camera_control_new(camera);
-
-        char *intrinsics_xml = psmove_util_get_file_path(INTRINSICS_XML);
-        char *distortion_xml = psmove_util_get_file_path(DISTORTION_XML);
-	camera_control_read_calibration(tracker->cc, intrinsics_xml, distortion_xml);
-        free(intrinsics_xml);
-        free(distortion_xml);
-
-	// backup the systems settings, if not already backuped
-	char *filename = psmove_util_get_file_path(PSEYE_BACKUP_FILE);
-        camera_control_backup_system_settings(tracker->cc, filename);
-	free(filename);
-
-#ifndef __APPLE__
-        // try to load color mapping data (not on Mac OS X for now, because the
-        // automatic white balance means we get different colors every time)
-        filename = psmove_util_get_file_path(COLOR_MAPPING_DAT);
-        FILE *fp = NULL;
-        time_t now = time(NULL);
-        struct stat st;
-        memset(&st, 0, sizeof(st));
-
-        if (stat(filename, &st) == 0 && now != (time_t)-1) {
-            if (st.st_mtime >= (now - COLOR_MAPPING_MAX_AGE)) {
-                fp = fopen(filename, "rb");
-            } else {
-                printf("%s is too old - not restoring colors.\n", filename);
-            }
-        }
-
-        if (fp) {
-            if (!fread(&(tracker->color_mapping),
-                        sizeof(struct ColorMappingRingBuffer),
-                        1, fp)) {
-                psmove_WARNING("Cannot read data from: %s\n", filename);
-            } else {
-                printf("color mappings restored.\n");
-            }
-
-            fclose(fp);
-        }
-        free(filename);
-#endif
-
-        // Default to the distance parameters for the PS Eye camera
-        tracker->distance_parameters = pseye_distance_parameters;
-
-	// use static exposure
-        psmove_tracker_set_exposure(tracker, Exposure_LOW);
-
-	// just query a frame so that we know the camera works
-	IplImage* frame = NULL;
-	while (!frame) {
-		frame = camera_control_query_frame(tracker->cc, NULL, NULL);
-	}
-
-	// prepare ROI data structures
-
-        /* Define the size of the biggest ROI */
-        int size = psmove_util_get_env_int(PSMOVE_TRACKER_ROI_SIZE_ENV);
-
-        if (size == -1) {
-            size = MIN(frame->width, frame->height) / 2;
-        } else {
-            psmove_DEBUG("Using ROI size: %d\n", size);
-        }
-
-        int w = size, h = size;
-
-    // We need to grab an image from the camera to determine the frame size
-    psmove_tracker_update_image(tracker);
-
-    tracker->search_tile_width = w;
-    tracker->search_tile_height = h;
-
-    tracker->search_tiles_horizontal = (tracker->frame->width +
-            tracker->search_tile_width - 1) / tracker->search_tile_width;
-    int search_tiles_vertical = (tracker->frame->height +
-            tracker->search_tile_height - 1) / tracker->search_tile_height;
-
-    tracker->search_tiles_count = tracker->search_tiles_horizontal *
-        search_tiles_vertical;
-
-    if (tracker->search_tiles_count % 2 == 0) {
-        /**
-         * search_tiles_count must be uneven, so that when picking every second
-         * tile, we still "visit" every tile after two scans when we wrap:
-         *
-         *  ABA
-         *  BAB
-         *  ABA -> OK, first run = A, second run = B
-         *
-         *  ABAB
-         *  ABAB -> NOT OK, first run = A, second run = A
-         *
-         * Incrementing the count will make the algorithm visit the lower right
-         * item twice, but will then cause the second run to visit 'B's.
-         *
-         * We pick every second tile, so that we only need half the time to
-         * sweep through the whole image (which usually means faster recovery).
-         **/
-        tracker->search_tiles_count++;
-    }
-
-
-	int i;
-	for (i = 0; i < ROIS; i++) {
-		tracker->roiI[i] = cvCreateImage(cvSize(w,h), frame->depth, 3);
-		tracker->roiM[i] = cvCreateImage(cvSize(w,h), frame->depth, 1);
-
-		/* Smaller rois are always square, and 70% of the previous level */
-		h = w = MIN(w,h) * 0.7f;
-	}
-
-	// prepare structure used for erode and dilate in calibration process
-	int ks = 5; // Kernel Size
-	int kc = (ks + 1) / 2; // Kernel Center
-	tracker->kCalib = cvCreateStructuringElementEx(ks, ks, kc, kc, CV_SHAPE_RECT, NULL);
-
-#ifdef __APPLE__
-    printf("Move the controller away and press the Move button\n");
-    _psmove_wait_for_button(move, Btn_MOVE);
-    psmove_set_leds(move, 0, 0, 0);
-    psmove_update_leds(move);
-    psmove_disconnect(move);
-#endif
-
-	return tracker;
 }
 
 enum PSMoveTracker_Status
