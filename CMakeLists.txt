@@ -146,6 +146,35 @@ endif()
 
 set(INFO_USE_CL_EYE_SDK "No (Windows only)")
 
+# Alternative to swig_add_module which generates a .dylib instead of a .so on darwin
+MACRO(SWIG_ADD_SHARED_MODULE name language)
+  SWIG_MODULE_INITIALIZE(${name} ${language})
+  SET(swig_dot_i_sources)
+  SET(swig_other_sources)
+  FOREACH(it ${ARGN})
+    IF(${it} MATCHES ".*\\.i$")
+      SET(swig_dot_i_sources ${swig_dot_i_sources} "${it}")
+    ELSE(${it} MATCHES ".*\\.i$")
+      SET(swig_other_sources ${swig_other_sources} "${it}")
+    ENDIF(${it} MATCHES ".*\\.i$")
+  ENDFOREACH(it)
+
+  SET(swig_generated_sources)
+  FOREACH(it ${swig_dot_i_sources})
+    SWIG_ADD_SOURCE_TO_MODULE(${name} swig_generated_source ${it})
+    SET(swig_generated_sources ${swig_generated_sources}
+"${swig_generated_source}")
+  ENDFOREACH(it)
+  GET_DIRECTORY_PROPERTY(swig_extra_clean_files ADDITIONAL_MAKE_CLEAN_FILES)
+  SET_DIRECTORY_PROPERTIES(PROPERTIES
+    ADDITIONAL_MAKE_CLEAN_FILES
+"${swig_extra_clean_files};${swig_generated_sources}")
+  ADD_LIBRARY(${SWIG_MODULE_${name}_REAL_NAME}
+    SHARED                  
+    ${swig_generated_sources}
+    ${swig_other_sources})
+ENDMACRO(SWIG_ADD_SHARED_MODULE)
+
 IF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     find_library(FOUNDATION Foundation)
     find_library(IOKIT IOKit)
@@ -584,36 +613,6 @@ macro(feature_use_info CAPTION FEATURE)
         message("    " ${CAPTION} "No")
     endif()
 endmacro()
-
-# Alternative to swig_add_module which generates a .dylib instead of a .so on darwin
-macro(swig_shared_module name language)
-  swig_module_initialize(${name} ${language})
-  set(swig_dot_i_sources)
-  set(swig_other_sources)
-  foreach(it ${ARGN})
-    if(${it} matches ".*\\.i$")
-      set(swig_dot_i_sources ${swig_dot_i_sources} "${it}")
-    else(${it} matches ".*\\.i$")
-      set(swig_other_sources ${swig_other_sources} "${it}")
-    endif(${it} matches ".*\\.i$")
-  endforeach(it)
-
-  set(swig_generated_sources)
-  foreach(it ${swig_dot_i_sources})
-    SWIG_ADD_SOURCE_TO_MODULE(${name} swig_generated_source ${it})
-    set(swig_generated_sources ${swig_generated_sources}
-"${swig_generated_source}")
-  endforeach(it)
-  get_directory_property(swig_extra_clean_files ADDITIONAL_MAKE_CLEAN_FILES)
-  set_directory_properties(PROPERTIES
-    ADDITIONAL_MAKE_CLEAN_FILES
-"${swig_extra_clean_files};${swig_generated_sources}")
-  add_library(${SWIG_MODULE_${name}_REAL_NAME}
-    SHARED                  
-    ${swig_generated_sources}
-    ${swig_other_sources})
-endmacro(SWIG_ADD_SHARED_MODULE)
-
 
 # Configuration report
 message("")
