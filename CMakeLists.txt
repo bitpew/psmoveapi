@@ -26,7 +26,7 @@ link_directories(${PSMOVEAPI_SOURCE_DIR}/external/libs)
 # Language bindings
 option(PSMOVE_BUILD_QT_BINDINGS "Build the Qt bindings" OFF)
 option(PSMOVE_BUILD_JAVA_BINDINGS "Build the Java bindings" OFF)
-option(PSMOVE_BUILD_CSHARP_BINDINGS "Build the C# bindings" OFF)
+option(PSMOVE_BUILD_CSHARP_BINDINGS "Build the C# bindings" ON)
 option(PSMOVE_BUILD_PROCESSING_BINDINGS "Build the Processing bindings" OFF)
 option(PSMOVE_BUILD_PYTHON_BINDINGS "Build the Python bindings" ON)
 
@@ -57,7 +57,7 @@ option(PSMOVE_USE_DEBUG "Build for debugging" OFF)
 option(PSMOVE_USE_TRACKER_TRACE "Write tracker calibration images to disk" OFF)
 
 # Madgwick's orientation algorithm (GPL-licensed)
-option(PSMOVE_USE_MADGWICK_AHRS "Use AHRS algorithm (GPL license)" OFF)
+option(PSMOVE_USE_MADGWICK_AHRS "Use AHRS algorithm (GPL license)" ON)
 
 
 # https://github.com/thp/psmoveapi/issues/29
