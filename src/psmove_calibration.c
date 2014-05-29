@@ -54,6 +54,14 @@ struct _PSMoveCalibration {
 
     char *filename;
 
+    /**
+     * system_filename always points to calibration file stored in
+     * system-wide data directory, while filename above points to
+     * local calibration file for a non-root user or to system
+     * calibration file if run by root.
+     **/
+    char *system_filename;
+
     /* Pre-calculated factors for accelerometer mapping */
     float ax, ay, az;
 
@@ -252,6 +260,12 @@ psmove_calibration_new(PSMove *move)
         serial = psmove_get_serial(move);
     }
 
+    if (!serial) {
+        psmove_CRITICAL("Could not determine serial from controller");
+        free(calibration);
+        return NULL;
+    }
+
     for (i=0; i<strlen(serial); i++) {
         if (serial[i] == ':') {
             serial[i] = '_';
@@ -264,6 +278,7 @@ psmove_calibration_new(PSMove *move)
     strcat(template, PSMOVE_CALIBRATION_EXTENSION);
 
     calibration->filename = psmove_util_get_file_path(template);
+    calibration->system_filename = psmove_util_get_system_file_path(template);
 
     free(template);
     free(serial);
@@ -411,6 +426,7 @@ psmove_calibration_dump(PSMoveCalibration *calibration)
     psmove_return_if_fail(calibration != NULL);
 
     printf("File: %s\n", calibration->filename);
+    printf("System file: %s\n", calibration->system_filename);
     printf("Flags: %x\n", calibration->flags);
 
     if (calibration->flags & CalibrationFlag_HaveUSB) {
@@ -474,21 +490,28 @@ psmove_calibration_load(PSMoveCalibration *calibration)
 
     fp = fopen(calibration->filename, "rb");
     if (fp == NULL) {
+        // use system file in case local is not available
+        fp = fopen(calibration->system_filename, "rb");
+        if (fp == NULL) {
+            return 0;
+        }
         return 0;
     }
 
-    rc = fread(calibration->usb_calibration,
-                    sizeof(calibration->usb_calibration),
-                    1, fp);
+    if (fread(calibration->usb_calibration,
+              sizeof(calibration->usb_calibration), 1, fp) != 1) {
+        psmove_CRITICAL("Unable to read USB calibration");
+        fclose(fp);
+        return 0;
+    }
+    if (fread(&(calibration->flags),
+              sizeof(calibration->flags), 1, fp) != 1) {
+        psmove_CRITICAL("Unable to read USB calibration");
+        fclose(fp);
+        return 0;
+    }
 
-    assert(rc == 1);
-
-    rc = fread(&(calibration->flags),
-                    sizeof(calibration->flags),
-                    1, fp);
-    assert(rc == 1);
     fclose(fp);
-
     return 1;
 }
 
@@ -501,20 +524,28 @@ psmove_calibration_save(PSMoveCalibration *calibration)
     size_t rc;
 
     fp = fopen(calibration->filename, "wb");
-    assert(fp != NULL);
+    if (fp == NULL) {
+        psmove_CRITICAL("Unable to write USB calibration");
+        return 0;
+    }
 
-    rc = fwrite(calibration->usb_calibration,
-                       sizeof(calibration->usb_calibration),
-                       1, fp);
-    assert(rc == 1);
+    if (fwrite(calibration->usb_calibration,
+               sizeof(calibration->usb_calibration),
+               1, fp) != 1) {
+        psmove_CRITICAL("Unable to write USB calibration");
+        fclose(fp);
+        return 0;
+    }
 
-    rc = fwrite(&(calibration->flags),
-                sizeof(calibration->flags),
-                1, fp);
-    assert(rc == 1);
+    if (fwrite(&(calibration->flags),
+               sizeof(calibration->flags),
+               1, fp) != 1) {
+        psmove_CRITICAL("Unable to write USB calibration");
+        fclose(fp);
+        return 0;
+    }
 
     fclose(fp);
-
     return 1;
 }
 
@@ -524,6 +555,7 @@ psmove_calibration_free(PSMoveCalibration *calibration)
     psmove_return_if_fail(calibration != NULL);
 
     free(calibration->filename);
+    free(calibration->system_filename);
     free(calibration);
 }
 

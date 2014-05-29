@@ -404,9 +404,7 @@ psmove_tracker_create_default() {
     PSMoveTracker* tracker = (PSMoveTracker*) calloc(1, sizeof(PSMoveTracker));
     tracker->rHSV = cvScalar(COLOR_FILTER_RANGE_H, COLOR_FILTER_RANGE_S, COLOR_FILTER_RANGE_V, 0);
     tracker->storage = cvCreateMemStorage(0);
-
     tracker->dimming_factor = 0.;
-
     tracker->calibration_t = CALIBRATION_DIFF_T;
     tracker->tracker_t1 = TRACKER_QUALITY_T1;
     tracker->tracker_t2 = TRACKER_QUALITY_T2;
@@ -418,7 +416,6 @@ psmove_tracker_create_default() {
     tracker->color_t2 = COLOR_UPDATE_QUALITY_T2;
     tracker->color_t3 = COLOR_UPDATE_QUALITY_T3;
     tracker->color_update_rate = COLOR_UPDATE_RATE;
-
     return tracker;
 }
 
@@ -432,15 +429,12 @@ psmove_tracker_exposure_lock_init() {
 
 void 
 psmove_tracker_exposure_lock_process(PSMove *move, PSMoveTracker *tracker, int camera) {
-#ifdef __APPLE__
-    if(move != NULL) {
-        psmove_set_leds(move, 0, 0, 0);
-        psmove_update_leds(move);
-        psmove_set_leds(move, 255, 255, 255);
-        psmove_update_leds(move);
-    }
+#if defined(__APPLE__) && !defined(CAMERA_CONTROL_USE_PS3EYE_DRIVER)
+    psmove_set_leds(move, 0, 0, 0);
+    psmove_update_leds(move);
+    psmove_set_leds(move, 255, 255, 255);
+    psmove_update_leds(move);
 #endif
-
     // start the video capture device for tracking
     tracker->cc = camera_control_new(camera);
 
@@ -455,7 +449,7 @@ psmove_tracker_exposure_lock_process(PSMove *move, PSMoveTracker *tracker, int c
     camera_control_backup_system_settings(tracker->cc, filename);
     free(filename);
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) || defined(CAMERA_CONTROL_USE_PS3EYE_DRIVER)
         // try to load color mapping data (not on Mac OS X for now, because the
         // automatic white balance means we get different colors every time)
         filename = psmove_util_get_file_path(COLOR_MAPPING_DAT);
@@ -574,16 +568,17 @@ psmove_tracker_exposure_lock_finish(PSMove *move) {
 PSMoveTracker *
 psmove_tracker_new_with_camera(int camera) {
     PSMoveTracker *tracker = psmove_tracker_create_default();
-
     PSMove *move = NULL;
-#ifdef __APPLE__
+
+#if !defined(__APPLE__) || defined(CAMERA_CONTROL_USE_PS3EYE_DRIVER)
     move = psmove_tracker_exposure_lock_init();
     printf("Cover the camera with the sphere and press the Move button\n");
     _psmove_wait_for_button(move, Btn_MOVE);
 #endif
+
     psmove_tracker_exposure_lock_process(move, tracker, camera);
 
-#ifdef __APPLE__
+#if !defined(__APPLE__) || defined(CAMERA_CONTROL_USE_PS3EYE_DRIVER)
     printf("Move the controller away and press the Move button\n");
     _psmove_wait_for_button(move, Btn_MOVE);
     psmove_tracker_exposure_lock_finish(move);
@@ -665,6 +660,9 @@ psmove_tracker_set_exposure(PSMoveTracker *tracker,
 
     float target_luminance = 0;
     switch (tracker->exposure_mode) {
+        case Exposure_LOW:
+            target_luminance = 0;
+            break;
         case Exposure_MEDIUM:
             target_luminance = 25;
             break;
@@ -676,7 +674,7 @@ psmove_tracker_set_exposure(PSMoveTracker *tracker,
             break;
     }
 
-    #if defined(__APPLE__)
+    #if defined(__APPLE__) && !defined(CAMERA_CONTROL_USE_PS3EYE_DRIVER)
         camera_control_initialize();
     #endif
 

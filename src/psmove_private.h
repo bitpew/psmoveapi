@@ -106,6 +106,8 @@ struct PSMove_RGBValue {
 /* Three blocks, minus 2x the header (2 bytes) for the 2nd and 3rd block */
 #define PSMOVE_CALIBRATION_BLOB_SIZE (PSMOVE_CALIBRATION_SIZE*3 - 2*2)
 
+/* System-wide data directory */
+#define PSMOVE_SYSTEM_DATA_DIR "/etc/psmoveapi"
 
 /**
  * [PRIVATE API] Write raw data blob to device
@@ -204,6 +206,44 @@ ADDCALL _psmove_timestamp_value(PSMove_timestamp ts);
 /* Misc utility functions */
 ADDAPI void
 ADDCALL _psmove_wait_for_button(PSMove *move, int button);
+
+
+/* Firmware-related private APIs */
+
+/*! Controller's operation mode. */
+enum PSMove_Operation_Mode {
+    Mode_Normal, /*!< Default mode after starting the controller */
+    Mode_STDFU,
+    Mode_BTDFU,
+};
+
+typedef struct {
+    unsigned short version;    /*!< Move's firmware version number */
+    unsigned short bt_version; /*!< Move Bluetooth module's firmware version number */
+    unsigned short revision;   /*!< Move's firmware revision number */
+    unsigned char _unknown[7];
+} PSMove_Firmware_Info;
+
+ADDAPI PSMove_Firmware_Info *
+ADDCALL _psmove_get_firmware_info(PSMove *move);
+
+ADDAPI enum PSMove_Bool
+ADDCALL _psmove_set_operation_mode(PSMove *move, enum PSMove_Operation_Mode mode);
+
+
+/* Authentication-related private APIs */
+
+/* A challenge data buffer for authentication. */
+typedef unsigned char PSMove_Data_AuthChallenge[34];
+
+/* A response data buffer for authentication. */
+typedef unsigned char PSMove_Data_AuthResponse[22];
+
+ADDAPI enum PSMove_Bool
+ADDCALL _psmove_set_auth_challenge(PSMove *move, PSMove_Data_AuthChallenge *challenge);
+
+ADDAPI PSMove_Data_AuthResponse *
+ADDCALL _psmove_get_auth_response(PSMove *move);
 
 
 #ifdef __cplusplus

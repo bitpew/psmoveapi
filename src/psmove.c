@@ -57,7 +57,6 @@
 #  include <bluetooth/hci_lib.h>
 #  include <sys/ioctl.h>
 #  include <linux/limits.h>
-#  define __USE_GNU
 #  include <pthread.h>
 #  include <unistd.h>
 #  define PSMOVE_USE_PTHREADS
@@ -102,13 +101,17 @@
 /* Minimum time (in milliseconds) between two LED updates (rate limiting) */
 #define PSMOVE_MIN_LED_UPDATE_WAIT_MS 120
 
+
 enum PSMove_Request_Type {
     PSMove_Req_GetInput = 0x01,
     PSMove_Req_SetLEDs = 0x02,
     PSMove_Req_GetBTAddr = 0x04,
     PSMove_Req_SetBTAddr = 0x05,
     PSMove_Req_GetCalibration = 0x10,
-    PSMove_Req_GetFirmwareVersion = 0xF9,
+    PSMove_Req_SetAuthChallenge = 0xA0,
+    PSMove_Req_GetAuthResponse = 0xA1,
+    PSMove_Req_SetDFUMode = 0xF2,
+    PSMove_Req_GetFirmwareInfo = 0xF9,
 
     /**
      * Permanently set LEDs via USB
@@ -153,7 +156,7 @@ typedef struct {
 #define TWELVE_BIT_SIGNED(x) (((x) & 0x800)?(-(((~(x)) & 0xFFF) + 1)):(x))
 
 /* Decode 16-bit signed value from data pointer and offset */
-inline int
+static inline int
 psmove_decode_16bit(char *data, int offset)
 {
     unsigned char low = data[offset] & 0xFF;
@@ -639,26 +642,116 @@ _psmove_get_device_path(PSMove *move)
     return move->device_path;
 }
 
-void
-_psmove_get_firmware(PSMove *move)
+enum PSMove_Bool
+_psmove_set_auth_challenge(PSMove *move, PSMove_Data_AuthChallenge *challenge)
 {
-    unsigned char btg[PSMOVE_BUFFER_SIZE];
+    unsigned char buf[sizeof(PSMove_Data_AuthChallenge) + 1];
     int res;
 
-    psmove_return_if_fail(move != NULL);
+    psmove_return_val_if_fail(move != NULL, PSMove_False);
 
-    memset(btg, 0, sizeof(btg));
-    btg[0] = PSMove_Req_GetFirmwareVersion;
-    res = hid_get_feature_report(move->handle, btg, sizeof(btg));
+    memset(buf, 0, sizeof(buf));
+    buf[0] = PSMove_Req_SetAuthChallenge;
 
-    printf("got bytes: %d\n", res);
-    int i;
-    for (i=0; i<res; i++) {
-        printf("%02x ", btg[i]);
-    }
-    printf("\n");
+    /* Copy challenge data into send buffer */
+    memcpy(buf + 1, challenge, sizeof(buf) - 1);
+
+    res = hid_send_feature_report(move->handle, buf, sizeof(buf));
+
+    return (res == sizeof(buf));
 }
 
+PSMove_Data_AuthResponse *
+_psmove_get_auth_response(PSMove *move)
+{
+    unsigned char buf[sizeof(PSMove_Data_AuthResponse) + 1];
+    int res;
+
+    psmove_return_val_if_fail(move != NULL, NULL);
+
+    memset(buf, 0, sizeof(buf));
+    buf[0] = PSMove_Req_GetAuthResponse;
+    res = hid_get_feature_report(move->handle, buf, sizeof(buf));
+
+    /* Copy response data into output buffer */
+    PSMove_Data_AuthResponse *output_buf = malloc(sizeof(PSMove_Data_AuthResponse));
+    memcpy(*output_buf, buf + 1, sizeof(*output_buf));
+    
+    return output_buf;
+}
+
+PSMove_Firmware_Info *
+_psmove_get_firmware_info(PSMove *move)
+{
+    unsigned char buf[14];
+    int res;
+    int expected_res = sizeof(buf) - 1;
+    unsigned char *p = buf;
+
+    psmove_return_val_if_fail(move != NULL, NULL);
+
+    memset(buf, 0, sizeof(buf));
+    buf[0] = PSMove_Req_GetFirmwareInfo;
+    res = hid_get_feature_report(move->handle, buf, sizeof(buf));
+
+    /**
+     * The Bluetooth report contains the Report ID as additional first byte
+     * while the USB report does not. So we need to check the current connection
+     * type in order to determine the correct offset for reading from the report
+     * buffer.
+     **/
+
+    if (psmove_connection_type(move) == Conn_Bluetooth) {
+        expected_res += 1;
+        p = buf + 1;
+    }
+
+    psmove_return_val_if_fail(res == expected_res, NULL);
+
+    PSMove_Firmware_Info *info = malloc(sizeof(PSMove_Firmware_Info));
+
+    /* NOTE: Each field in the report is stored in Big-Endian byte order */
+    info->version    = (p[0] << 8) | p[1];
+    info->revision   = (p[2] << 8) | p[3];
+    info->bt_version = (p[4] << 8) | p[5];
+
+    /* Copy unknown trailing bytes into info struct */
+    memcpy(info->_unknown, p + 6, sizeof(info->_unknown));
+    
+    return info;
+}
+
+enum PSMove_Bool
+_psmove_set_operation_mode(PSMove *move, enum PSMove_Operation_Mode mode)
+{
+    unsigned char buf[10];
+    int res;
+    int mode_magic_val;
+
+    psmove_return_val_if_fail(move != NULL, PSMove_False);
+    
+    /* We currently support setting STDFU or BTDFU mode only */
+    psmove_return_val_if_fail(mode == Mode_STDFU || mode == Mode_BTDFU, PSMove_False);
+    
+    switch (mode) {
+        case Mode_STDFU:
+            mode_magic_val = 0x42;
+            break;
+        case Mode_BTDFU:
+            mode_magic_val = 0x43;
+            break;
+        default:
+            mode_magic_val = 0;
+            break;
+    }
+
+    memset(buf, 0, sizeof(buf));
+    buf[0] = PSMove_Req_SetDFUMode;
+    buf[1] = mode_magic_val;
+    res = hid_send_feature_report(move->handle, buf, sizeof(buf));
+
+    return (res == sizeof(buf));
+}
 
 PSMove *
 psmove_connect_remote_by_id(int id, moved_client *client, int remote_id)
@@ -916,6 +1009,7 @@ psmove_pair(PSMove *move)
     }
     free(btaddr_string);
 #elif defined(__linux)
+    memset(btaddr, 0, sizeof(PSMove_Data_BTAddr));
     hci_for_each_dev(HCI_UP, _psmove_linux_bt_dev_info, (long)btaddr);
 #elif defined(_WIN32)
     HBLUETOOTH_RADIO_FIND hFind;
@@ -1807,8 +1901,21 @@ psmove_util_get_file_path(const char *filename)
 {
     const char *parent = psmove_util_get_data_dir();
     char *result;
-
     struct stat st;
+
+#ifndef __WIN32
+    // if run as root, use system-wide data directory
+    if (geteuid() == 0) {
+        parent = PSMOVE_SYSTEM_DATA_DIR;
+    }
+#endif
+
+    if (stat(filename, &st) == 0) {
+        // File exists in the current working directory, prefer that
+        // to the file in the default data / configuration directory
+        return strdup(filename);
+    }
+
     if (stat(parent, &st) != 0) {
 #ifdef _WIN32
         psmove_return_val_if_fail(mkdir(parent) == 0, NULL);
@@ -1821,6 +1928,22 @@ psmove_util_get_file_path(const char *filename)
     strcpy(result, parent);
     strcat(result, PATH_SEP);
     strcat(result, filename);
+
+    return result;
+}
+
+char *
+psmove_util_get_system_file_path(const char *filename)
+{
+    char *result;
+    int len = strlen(PSMOVE_SYSTEM_DATA_DIR) + 1 + strlen(filename) + 1;
+
+    result = malloc(len);
+    if (result == NULL) {
+        return NULL;
+    }
+
+    snprintf(result, len, "%s%s%s", PSMOVE_SYSTEM_DATA_DIR, PATH_SEP, filename);
 
     return result;
 }
